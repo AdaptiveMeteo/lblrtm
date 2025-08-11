@@ -84,14 +84,73 @@ def load_profile(ds: xr.Dataset, index: int, temp_filename: str = None) -> dict:
 
     return profile_dict
 
-def run_lblrtm(container_image, host_in, cont_in, host_out, cont_out, timeout_seconds):
+"""
+def run_lblrtm(path,timeout_seconds):
     cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{host_in}:{cont_in}",
-        "-v", f"{host_out}:{cont_out}",
-        container_image
+        f"{path}/lblrtm_v12.17_linux_gnu_dbl"
     ]
     subprocess.run(cmd, timeout=timeout_seconds, check=True)
+"""
+from pathlib import Path
+import subprocess
+import os
+
+def run_lblrtm(work_dir, timeout_seconds, expect=("TAPE27","TAPE12")):
+    """Run LBLRTM in work_dir; return stdout/stderr; assert expected outputs exist."""
+    wd = Path(work_dir)
+
+    # Sanity: inputs we expect for a radiance run
+    must_exist = ["TAPE5", "TAPE3"]
+    for m in must_exist:
+        p = wd / m
+        if not p.exists():
+            raise FileNotFoundError(f"[run_lblrtm] Missing required input {m} at {p}")
+
+    exe = wd / "lblrtm_v12.17_linux_gnu_dbl"
+    if not exe.exists():
+        raise FileNotFoundError(f"[run_lblrtm] LBLRTM exe not found at {exe}")
+    # ensure executable bit
+    exe.chmod(exe.stat().st_mode | 0o111)
+
+    # Helpful: pin threads to avoid oversubscription weirdness
+    env = os.environ.copy()
+    env.setdefault("OMP_NUM_THREADS", "1")
+
+    try:
+        cp = subprocess.run(
+            [str(exe)],
+            cwd=str(wd),
+            timeout=timeout_seconds,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError as e:
+        # Show everything to understand the STOP
+        raise RuntimeError(
+            f"[run_lblrtm] LBLRTM failed in {wd}\n"
+            f"--- STDOUT ---\n{e.stdout}\n"
+            f"--- STDERR ---\n{e.stderr}\n"
+        ) from e
+
+    # Verify outputs if requested
+    missing = []
+    for out in expect:
+        if out and not (wd / out).exists():
+            missing.append(out)
+
+    if missing:
+        # Show TAPE5 to understand flags
+        tape5 = (wd / "TAPE5").read_text(errors="ignore") if (wd / "TAPE5").exists() else "<missing>"
+        raise RuntimeError(
+            f"[run_lblrtm] Completed but missing outputs {missing} in {wd}.\n"
+            f"Likely TAPE5 does not request them (e.g., PL=1 for TAPE27). "
+            f"Here are the first 50 lines of TAPE5:\n"
+            f"{os.linesep.join(tape5.splitlines()[:50])}"
+        )
+
+    return cp.stdout, cp.stderr
 
 def get_band_limits(instrument, band):
     if instrument == 2:  # IASI
@@ -115,7 +174,7 @@ def get_band_limits(instrument, band):
     else:
         raise ValueError(f"Unsupported instrument {instrument}")
 
-def worker(ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
+def worker(mode, ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
            docker_image, instrument, docker_timeout, band,
            emissivity_nc, n_eig):
 
@@ -128,7 +187,7 @@ def worker(ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
     host_in_prof.mkdir(parents=True, exist_ok=True)
     host_out_prof.mkdir(parents=True, exist_ok=True)
 
-    for fname in ["TAPE3", "FSCDXS", "lblrtm_v12.17_linux_gnu_dbl"]:
+    for fname in ["TAPE3", "FSCDXS", "lblrtm_v12.17_linux_gnu_dbl", "absco-ref_wv-mt-ckd.nc"]:
         src = host_in / fname
         if src.exists():
             shutil.copy(src, host_in_prof / fname)
@@ -169,33 +228,79 @@ def worker(ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
     v1_band, v2_band = get_band_limits(instrument, band)
     band_range_input = [v1_band - 20.0, v2_band + 20.0]
 
-    lbl_write_tape5(
-        prof,
-        f"Profile {idx}",
-        band_range_input,
-        [sfctemp, 1.0],
-        [pmin, pmax, 180.0],
-        1,
-        np.full_like(prof["pressure"], 420.0),
-        1,
-        band_range_input,
-        0,
-        instrument,
-        tape5
-    )
+    if mode == 'rad':
 
-    print(f"host_in_prof: {host_in_prof}")
-    print(f"host_out_prof: {host_out_prof}")
-    print(f"cont_out: {cont_out}")
+        lbl_write_tape5(
+            prof,
+            f"Profile {idx}",
+            band_range_input,
+            [sfctemp, 1.0],
+            [pmin, pmax, 180.0],
+            1,
+            np.full_like(prof["pressure"], 420.0),
+            1,
+            band_range_input,
+            0,
+            instrument,
+            tape5
+        )
+        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        print(f"run radiance profile: {idx}")
 
-    """
-    run_lblrtm(
-        docker_image,
-        host_in_prof, cont_in,
-        host_out_prof, cont_out,
-        timeout_seconds=docker_timeout
-    )
-    """
+    elif mode == 'od':
+
+        lbl_write_tape5_od(
+            prof,
+            f"Profile {idx}",
+            band_range_input,
+            [sfctemp, 1.0],
+            [pmin, pmax, 180.0],
+            1,
+            np.full_like(prof["pressure"], 420.0),
+            1,
+            band_range_input,
+            0,
+            instrument,
+            tape5
+        )
+        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        print(f"run od profile: {idx}")
+
+    elif mode == 'all':
+
+        lbl_write_tape5(
+            prof,
+            f"Profile {idx}",
+            band_range_input,
+            [sfctemp, 1.0],
+            [pmin, pmax, 180.0],
+            1,
+            np.full_like(prof["pressure"], 420.0),
+            1,
+            band_range_input,
+            0,
+            instrument,
+            tape5
+        )
+        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        print(f"run radiance profile: {idx}")
+
+        lbl_write_tape5_od(
+            prof,
+            f"Profile {idx}",
+            band_range_input,
+            [sfctemp, 1.0],
+            [pmin, pmax, 180.0],
+            1,
+            np.full_like(prof["pressure"], 420.0),
+            1,
+            band_range_input,
+            0,
+            instrument,
+            tape5
+        )
+        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        print(f"run od profile: {idx}")
 
     wn_rad, rad, inst_str = read_lbl_outputs(instrument, host_out_prof)
     mask = (wn_rad >= v1_band) & (wn_rad <= v2_band)
@@ -213,6 +318,7 @@ def main():
     parser.add_argument("--output_nc", type=Path, required=True)
     parser.add_argument("--docker_image", type=str, default="aurora_lblrtm:latest")
     parser.add_argument("--instrument", type=int, choices=[2,3], default=2)
+    parser.add_argument("--mode", type=str, default=None)
     parser.add_argument("--band", type=int, choices=[1,2,3], required=True)
     parser.add_argument("--host_in", type=Path, required=True)
     parser.add_argument("--cont_in", type=str, required=True)
@@ -232,6 +338,8 @@ def main():
     args.host_out.mkdir(parents=True, exist_ok=True)
     args.output_nc.parent.mkdir(parents=True, exist_ok=True)
 
+    mode = args.mode
+
     ds_in = xr.open_dataset(args.input_nc)
     total = ds_in.sizes["profile"]
     start = args.start_index
@@ -245,7 +353,7 @@ def main():
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(
-                worker, ds_in, idx,
+                worker, mode, ds_in, idx,
                 args.input_nc,
                 args.host_in, args.cont_in,
                 args.host_out, args.cont_out,
