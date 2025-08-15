@@ -8,12 +8,14 @@ import datetime
 import logging
 import os
 import shutil
+import glob
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
+import RC_utils as RC
 from netCDF4 import Dataset as NC
 
 from lbl_util_lib import lbl_write_tape5, lbl_write_tape5_od, read_lbl_outputs
@@ -56,6 +58,7 @@ def load_profile(ds: xr.Dataset, index: int, temp_filename: str = None) -> dict:
     T_K = ds["temperature_K"].isel(profile=index, level=slice(None)).values
     RH = ds["relative_humidity_pct"].isel(profile=index, level=slice(None)).values
     o3_Pa = ds["ozone_partial_pressure_Pa"].isel(profile=index, level=slice(None)).values
+    co2_ppmv = ds["co2_ppmv"].isel(profile=index, level=slice(None)).values
 
     # Convert ozone to ppmv, with clipping
     pressure_Pa = p_hPa * 100.0
@@ -67,7 +70,7 @@ def load_profile(ds: xr.Dataset, index: int, temp_filename: str = None) -> dict:
     w = rh_to_specific_humidity(p_hPa, T_K, RH)
 
     # Prepare output dictionary
-    profile_dict = {"pressure": p_hPa, "tdry": T_K, "w": w, "oz": ozone_ppmv, "alt": z}
+    profile_dict = {"pressure": p_hPa, "tdry": T_K, "w": w, "oz": ozone_ppmv, "co2": co2_ppmv, "alt": z}
 
     # Optional: write ASCII temperature file
     if temp_filename is not None:
@@ -95,7 +98,7 @@ from pathlib import Path
 import subprocess
 import os
 
-def run_lblrtm(work_dir, timeout_seconds, expect=("TAPE27","TAPE12")):
+def run_lblrtm(work_dir, timeout_seconds, expect=("TAPE5", "TAPE12")):
     """Run LBLRTM in work_dir; return stdout/stderr; assert expected outputs exist."""
     wd = Path(work_dir)
 
@@ -174,18 +177,61 @@ def get_band_limits(instrument, band):
     else:
         raise ValueError(f"Unsupported instrument {instrument}")
 
-def worker(mode, ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
-           docker_image, instrument, docker_timeout, band,
+def read_od_files(pattern: str):
+    files = sorted(glob.glob(pattern))
+    if not files:
+        raise FileNotFoundError(f"No files match {pattern}")
+    od_list = []
+    wn_ref = None
+    for f in files:
+        wn, od = RC.readBinary(f)
+        if wn_ref is None:
+            wn_ref = wn
+        elif not np.allclose(wn, wn_ref):
+            raise ValueError(f"Wavenumber grid mismatch in {f}")
+        od_list.append(np.asarray(od, dtype=float))
+    return np.asarray(wn_ref, dtype=float), np.vstack(od_list)
+
+def read_monochrmatic_rad(filepath):
+    import RC_utils as RC
+    filename = filepath / 'TAPE12'
+    #print(f"Hires Radiance file: {filename}")
+    wn, rad = RC.readBinary(filename)  # TOA radiances at high spectral resolution
+    return wn, rad
+
+def read_emissivity(filename, wn_target):
+    with open(filename, "r") as f:
+        header = f.readline().split()
+        wn_start = float(header[0])
+        wn_end = float(header[1])
+        n_points = int(header[3])
+        emis_vals = [float(line.strip()) for line in f if line.strip()]
+    emis_wn = np.linspace(wn_start, wn_end, n_points)
+    emis_interp = np.interp(wn_target, emis_wn, emis_vals)
+    return emis_interp
+
+def worker(mode, ds, idx, input_nc, host_in, host_out, instrument, lblrtm_timeout, band,
            emissivity_nc, n_eig):
 
     seed = os.getpid()  # or a combination like os.getpid() + time.time() for more variability
     rng = np.random.default_rng(seed)
+
+    if instrument==1:
+        instrument_str='S-HIS'
+    elif instrument==2:
+        instrument_str='IASI'
+    elif instrument==3:
+        instrument_str='CrIS'
+    else:
+        print(f'Insturument {instrument} Unknown Istrument, use 1 for S-HIS, 2 for IASI, 3 for CrIS')
+        return -1
 
     prof_dir = f"profile_{idx:05d}"
     host_in_prof = host_in / prof_dir
     host_out_prof = host_out / prof_dir
     host_in_prof.mkdir(parents=True, exist_ok=True)
     host_out_prof.mkdir(parents=True, exist_ok=True)
+    od_pattern = f"{host_in_prof}/ODint_*"
 
     for fname in ["TAPE3", "FSCDXS", "lblrtm_v12.17_linux_gnu_dbl", "absco-ref_wv-mt-ckd.nc"]:
         src = host_in / fname
@@ -244,8 +290,9 @@ def worker(mode, ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
             instrument,
             tape5
         )
-        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        run_lblrtm(host_in_prof, timeout_seconds=lblrtm_timeout)
         print(f"run radiance profile: {idx}")
+        mono_wn_rad, mono_rad, inst_str = read_lbl_outputs(instrument, host_out_prof)
 
     elif mode == 'od':
 
@@ -263,8 +310,10 @@ def worker(mode, ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
             instrument,
             tape5
         )
-        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        run_lblrtm(host_in_prof, timeout_seconds=lblrtm_timeout)
         print(f"run od profile: {idx}")
+        mono_wn_rad, mono_rad = read_monochrmatic_rad(host_out_prof)
+        mono_wn_od, mono_od = read_od_files(od_pattern)
 
     elif mode == 'all':
 
@@ -282,8 +331,11 @@ def worker(mode, ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
             instrument,
             tape5
         )
-        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        run_lblrtm(host_in_prof, timeout_seconds=lblrtm_timeout)
         print(f"run radiance profile: {idx}")
+        shutil.copy(host_in_prof / 'TAPE5', host_in_prof / 'TAPE5.rad')
+
+        mono_wn_rad, mono_rad = read_monochrmatic_rad(host_out_prof)
 
         lbl_write_tape5_od(
             prof,
@@ -299,33 +351,48 @@ def worker(mode, ds, idx, input_nc, host_in, cont_in, host_out, cont_out,
             instrument,
             tape5
         )
-        run_lblrtm(host_in_prof, timeout_seconds=docker_timeout)
+        run_lblrtm(host_in_prof, timeout_seconds=lblrtm_timeout)
         print(f"run od profile: {idx}")
+        #shutil.copy(host_in_prof / 'TAPE5', host_in_prof / 'TAPE5.od')
 
-    wn_rad, rad, inst_str = read_lbl_outputs(instrument, host_out_prof)
-    mask = (wn_rad >= v1_band) & (wn_rad <= v2_band)
-    wn_rad = wn_rad[mask]
-    rad = rad[mask]
+        mono_wn_od, mono_od = read_od_files(od_pattern)
 
-    #shutil.rmtree(host_in_prof)
-    #shutil.rmtree(host_out_prof)
+    mask = (mono_wn_rad >= v1_band) & (mono_wn_rad <= v2_band)
+    mono_wn_rad = mono_wn_rad[mask]
+    mono_rad = mono_rad[mask]
 
-    return (idx, wn_rad, rad, inst_str, emis_arr, wn_emis_full, coef, sfctemp)
+    mask = (mono_wn_od >= v1_band) & (mono_wn_od <= v2_band)
+    mono_wn_od = mono_wn_od[mask]
+    mono_od = mono_od[:, mask]
+
+    if os.path.exists(host_in_prof):
+        shutil.rmtree(host_in_prof)
+    if os.path.exists(host_out_prof):
+        shutil.rmtree(host_out_prof)
+
+    if mode == 'rad':
+
+        return (idx, mono_wn_rad, mono_rad, instrument_str, emis_arr, wn_emis_full, coef, sfctemp)
+
+    elif mode == 'od':
+
+        return (idx, mono_wn_rad, mono_rad, mono_wn_od, mono_od, instrument_str, emis_arr, wn_emis_full, coef, sfctemp)
+
+    elif mode == 'all':
+
+        return (idx, mono_wn_rad, mono_rad, mono_wn_od, mono_od, instrument_str, emis_arr, wn_emis_full, coef, sfctemp)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_nc", type=Path, required=True)
     parser.add_argument("--output_nc", type=Path, required=True)
-    parser.add_argument("--docker_image", type=str, default="aurora_lblrtm:latest")
     parser.add_argument("--instrument", type=int, choices=[2,3], default=2)
     parser.add_argument("--mode", type=str, default=None)
     parser.add_argument("--band", type=int, choices=[1,2,3], required=True)
     parser.add_argument("--host_in", type=Path, required=True)
-    parser.add_argument("--cont_in", type=str, required=True)
     parser.add_argument("--host_out", type=Path, required=True)
-    parser.add_argument("--cont_out", type=str, required=True)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--docker_timeout", type=int, default=240)
+    parser.add_argument("--lblrtm_timeout", type=int, default=240)
     parser.add_argument("--emissivity_nc", type=str, required=True)
     parser.add_argument("--n_eig", type=int, required=True)
     parser.add_argument("--no_overwrite", dest="overwrite", action="store_false")
@@ -342,6 +409,7 @@ def main():
 
     ds_in = xr.open_dataset(args.input_nc)
     total = ds_in.sizes["profile"]
+    level = ds_in.sizes["level"]
     start = args.start_index
     end = min(start + (args.max_observations or total - start), total)
     LOG.info("Processing profiles %d to %d of %d", start, end, total)
@@ -355,11 +423,10 @@ def main():
             executor.submit(
                 worker, mode, ds_in, idx,
                 args.input_nc,
-                args.host_in, args.cont_in,
-                args.host_out, args.cont_out,
-                args.docker_image,
+                args.host_in, 
+                args.host_out, 
                 args.instrument,
-                args.docker_timeout,
+                args.lblrtm_timeout,
                 args.band,
                 args.emissivity_nc,
                 args.n_eig
@@ -373,18 +440,49 @@ def main():
                 LOG.error("Worker exception: %s", e)
                 continue
 
-            idx, wn_rad, rad, inst_str, emis_arr, wn_emis, coef, skt = res
+            if mode == 'rad':
+
+                idx, mono_wn_rad, mono_rad, inst_str, emis_arr, wn_emis, coef, skt = res
+
+            elif mode == 'od':
+
+                idx, mono_wn_rad, mono_rad, mono_wn_od, mono_od, inst_str, emis_arr, wn_emis, coef, skt = res 
+                nlayer = mono_od.shape[0]
+
+            elif mode == 'all':
+
+                idx, mono_wn_rad, mono_rad, mono_wn_od, mono_od, inst_str, emis_arr, wn_emis, coef, skt = res 
+                nlayer = mono_od.shape[0]
 
             LOG.info("Profile %d finished (instrument=%s)", idx, inst_str)
+            
+            # infer sizes from arrays you have in hand
+            has_rad = mode in ("rad", "all")
+            has_od  = mode in ("od",  "all")
+            
             if first_write:
                 nc = NC(args.output_nc, "w", format="NETCDF4")
                 nc.createDimension("profile", total)
-                nc.createDimension("wn", len(wn_rad))
                 nc.createDimension("wn_emis", len(wn_emis))
                 nc.createDimension("n_eig", len(coef))
-                nc.createVariable("wn", "f4", ("wn",))[:] = wn_rad
+            
+                if has_rad:
+                    nc.createDimension("wn_rad", len(mono_wn_rad))
+                    nc.createVariable("wn_rad", "f4", ("wn_rad",))[:] = mono_wn_rad
+                    nc.createVariable("rad", "f4", ("profile", "wn_rad"), zlib=True)
+                    #TO BE DONE: Instrument Resolution Radiances should be added
+            
+                if has_od:
+                    nlayer = int(mono_od.shape[0])         # (layers, wn)
+                    nc.createDimension("wn_rad", len(mono_wn_rad))
+                    nc.createVariable("wn_rad", "f4", ("wn_rad",))[:] = mono_wn_rad
+                    nc.createVariable("rad", "f4", ("profile", "wn_rad"), zlib=True)
+                    nc.createDimension("layer", nlayer)
+                    nc.createDimension("wn_od", len(mono_wn_od))
+                    nc.createVariable("wn_od", "f4", ("wn_od",))[:] = mono_wn_od
+                    nc.createVariable("od", "f4", ("profile", "layer", "wn_od"), zlib=True)
+            
                 nc.createVariable("wn_emis", "f4", ("wn_emis",))[:] = wn_emis
-                nc.createVariable("rad", "f4", ("profile", "wn"), zlib=True)
                 nc.createVariable("emis", "f4", ("profile", "wn_emis"), zlib=True)
                 nc.createVariable("coef", "f4", ("profile", "n_eig"), zlib=True)
                 nc.createVariable("profile_number", "i4", ("profile",))
@@ -396,8 +494,15 @@ def main():
                 first_write = False
             else:
                 nc = NC(args.output_nc, "a")
-
-            nc.variables["rad"][idx, :] = rad
+            
+            # write only what exists for this mode
+            if has_rad:
+                nc.variables["rad"][idx, :] = mono_rad
+                #TO BE DONE: Instrument Resolution Radiances should be added
+            if has_od:
+                nc.variables["rad"][idx, :] = mono_rad
+                nc.variables["od"][idx, :, :] = mono_od
+            
             nc.variables["emis"][idx, :] = emis_arr
             nc.variables["coef"][idx, :] = coef
             nc.variables["skt"][idx] = skt
@@ -407,5 +512,7 @@ def main():
     ds_in.close()
     LOG.info("All done. Output NetCDF: %s", args.output_nc)
 
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()
