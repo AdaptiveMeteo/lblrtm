@@ -46,12 +46,7 @@ def lbl_write_tape5(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcflag
     with open(tape5f, "w") as fid:
         fid.write(f"$ {comment} \n")
 
-        if gcflag == 1:
-            flagstring = (' HI=1 F4=1 CN=1 AE=0 EM=1 SC=3 FI=0 PL=0 TS=0 AM=1 MG=' +
-                          ('1' if outfile_type == 1 else '0') + ' LA=0 OD=0 XS=1   00   00')
-        else:
-            flagstring = (' HI=1 F4=1 CN=6 AE=0 EM=1 SC=3 FI=0 PL=0 TS=0 AM=1 MG=' +
-                          ('1' if outfile_type == 1 else '0') + ' LA=0 OD=0 XS=1   00   00')
+        flagstring = (' HI=1 F4=1 CN=1 AE=0 EM=1 SC=0 FI=0 PL=0 TS=0 AM=1 MG=0 LA=0 OD=0 XS=1   00   00')
         fid.write(flagstring + '\n')
 
         if gcflag in [2, 3, 4, 5, 6]:
@@ -93,7 +88,8 @@ def lbl_write_tape5(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcflag
 
         for i in range(N):
             if gcflag == 1:
-                gcvar = [prof['w'][i], CO2amt[i] if hasattr(CO2amt, '__getitem__') else CO2amt, prof['oz'][i]]
+                #gcvar = [prof['w'][i], CO2amt[i] if hasattr(CO2amt, '__getitem__') else CO2amt, prof['oz'][i]]
+                gcvar = [prof['w'][i], prof['co2'][i] if hasattr(prof['co2'][i], '__getitem__') else CO2amt, prof['oz'][i]]
             elif gcflag == 2 or gcflag == 3:
                 gcvar = [prof['w'][i], 0.0, 0.0]; aflagstring = 'AAAA'
             elif gcflag == 4:
@@ -101,7 +97,8 @@ def lbl_write_tape5(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcflag
             elif gcflag == 5:
                 gcvar = [0.0, 0.0, prof['oz'][i]]; aflagstring = 'AAAA'
             elif gcflag == 6:
-                gcvar = [0.0, CO2amt[i] if hasattr(CO2amt, '__getitem__') else CO2amt, 0.0]; aflagstring = 'AAAA'
+                #gcvar = [0.0, CO2amt[i] if hasattr(CO2amt, '__getitem__') else CO2amt, 0.0]; aflagstring = 'AAAA'
+                gcvar = [0.0, prof['co2'][i] if hasattr(prof['co2'][i], '__getitem__') else CO2amt, 0.0]; aflagstring = 'AAAA'
 
             #fid.write(f"{0.0:10.3f}{prof['pressure'][i]:10.5f}{prof['tdry'][i]:10.3f}     AA   CAA{aflagstring}\n")
             fid.write(f"{prof['alt'][i]/1000.0:10.3f}{prof['pressure'][i]:10.5f}{prof['tdry'][i]:10.3f}     AA   CAA{aflagstring}\n")
@@ -114,111 +111,45 @@ def lbl_write_tape5(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcflag
         fid.write("1.105e-04 2.783e-04 5.027e-04\n")
         fid.write(f"{boundaries[-1]:10.3f}     AAA\n")
         fid.write("1.105e-04 2.783e-04 5.027e-04\n")
+        fid.write('-1.\n')
 
-        # FFT parameters and wavenumber grid for spectral output.
-        fftmargin = 10.0
-
+        fftmargin = 20
+        # FFTSCAN block for upwelling radiance and brightness temperature at TOA.
         v1 = VBOUND[0] + fftmargin
         v2 = VBOUND[1] - fftmargin
 
-        # --- Begin branch for FFTSCAN parameters ---
-        if instrument == 1:  # S-HIS
-            string1 = '1.03702766'
-            Xmax = float(string1)
-            dv = 1.0 / (2 * Xmax)
-            j1 = int(v1 / dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            j2 = int(v2 / dv) + 1
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1   -4    0       0.0   12    1    1   13  0 0  '
-            string5 = f'{dv:10.8f}'
-            string6 = '\n'
-        elif instrument == 2:  # IASI
-            string1 = '2.00000000'
-            Xmax = float(string1)
-            dv = 1.0 / (2 * Xmax)
-            j1 = int(v1 / dv) + 1
-            j2 = int(v2 / dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1   -2    0       0.0   12    1    1   13  0 0  '
-            string5 = f'{dv:10.8f}'
-            string6 = '\n'
-        elif instrument == 3:  # CrIS: use max OPD = 0.8 cm
-            string1 = '0.80000000'  # CrIS maximum OPD in cm
-            Xmax = float(string1)
-            dv = 1.0 / (2 * Xmax)  # dv in cm^-1; here dv = 0.625 cm^-1
-            j1 = int(v1 / dv) + 1
-            j2 = int(v2 / dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            # Set an assumed flag string; adjust as needed for CrIS.
-            string4 = '    1   -3    0       0.0   12    1    1   13  0 0  '
-            string5 = f'{dv:10.8f}'
-            string6 = '\n'
-        else:
-            raise ValueError("ERROR: instrument not properly defined")
-
-        out_string = string1 + string2 + string3 + string4 + string5 + string6
-        fid.write(out_string)
-        fid.write('-1.\n')
-
-       # FFTSCAN block for upwelling radiance and brightness temperature at TOA.
-        v1 = v1 + fftmargin
-        v2 = v2 - fftmargin
-
-        if instrument == 1:  # S-HIS
-            fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
-            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=2 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
-            string0 = '1.03702766'
-            Xmax = float(string0)
+        fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
+        if instrument == 2:  # IASI
+            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=3 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=1    0    0\n')
+            Xmax = 2.0
+            string0 = f'{Xmax:10.3}'
             dv = 1.0/(2*Xmax)
-            j1  = int(v1/dv) + 1
-            j2  = int(v2/dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1    1                  13    1    1   11    0'
-            string1 = f'{dv:10.8f}'
-            string5 = '\n'
-        elif instrument == 2:  # IASI
-            fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
-            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=2 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
-            string0 = '2.00000000'
-            Xmax = float(string0)
-            dv = 1.0/(2*Xmax)
-            j1  = int(v1/dv) + 1
-            j2  = int(v2/dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1    1                  13    1    1   11    0'
-            string1 = f'{dv:10.8f}'
-            string5 = '\n'
+            string1 = f'{v1:10.3f}'
+            string2 = f'{v2:10.3f}'
+            string3 = '    1    2   -1     0.250   12    1    1   11  0 0'
+            string4 = '\n'
         elif instrument == 3:  # CrIS
-            fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
-            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=2 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
-            string0 = '0.80000000'
-            Xmax = float(string0)
+            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=0 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=1    0    0\n')
+            Xmax = 0.8
+            string0 = f'{Xmax:10.3}'
             dv = 1.0/(2*Xmax)
-            j1  = int(v1/dv) + 1
-            j2  = int(v2/dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1    1                  13    1    1   11    0'
-            string1 = f'{dv:10.8f}'
-            string5 = '\n'
+            string1 = f'{v1:10.3f}'
+            string2 = f'{v2:10.3f}'
+            string3 = '    1    2   -1     0.250   12    1    1   11  0 0'
+            string4 = '\n'
         else:
             raise ValueError("ERROR: instrument not properly defined")
 
-        out_string = string1 + string2 + string3 + string4 + string5
+        out_string = string0 + string1 + string2 + string3 + string4 
         fid.write(out_string)
         fid.write('-1.\n')
 
 
         fid.write('$ Transfer to ASCII plotting data\n')
-        fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=0 FI=0 PL=1 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
+        fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=0 FI=0 PL=1 TS=0 AM=0 MG=0 LA=0 OD=0 XS=1    0    0\n')
         fid.write('# Plot title not used\n')
         string7 = '   10.2000  100.0000    5    0   11    0    1.0000 0  0    0\n'
-        out_string = string2 + string3 + string7
+        out_string = string1 + string2 + string7
         fid.write(out_string)
         fid.write('    0.0000    1.2000    7.0200    0.2000    4    0    1    1    0    0 0    3 27\n')
         fid.write(out_string)
@@ -230,10 +161,12 @@ def lbl_write_tape5(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcflag
 
 def lbl_write_tape5_od(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcflag, selwn, outfile_type, instrument, tape5f):
 
+    print('Writing TAPE5 OD')
+
     with open(tape5f, "w") as fid:
         fid.write(f"$ {comment} \n")
 
-        flagstring = (' HI=1 F4=1 CN=1 AE=0 EM=1 SC=3 FI=0 PL=0 TS=0 AM=1 MG=0 LA=0 OD=0 XS=1   00   00')
+        flagstring = (' HI=1 F4=1 CN=1 AE=0 EM=1 SC=0 FI=0 PL=0 TS=0 AM=1 MG=0 LA=0 OD=1 XS=1   00   00')
         fid.write(flagstring + '\n')
 
         if gcflag in [2, 3, 4, 5, 6]:
@@ -246,7 +179,7 @@ def lbl_write_tape5_od(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcf
             }
             fid.write("".join(f"{v:10.3f}" for v in multipliers[gcflag]) + '\n')
 
-        fid.write(f"{VBOUND[0]:10.3f}{VBOUND[1]:10.3f}\n")
+        fid.write(f"{VBOUND[0]:10.3f}{VBOUND[1]:10.3f}     0.000                                                                 0.010\n")
         #fid.write(f"{TBOUND[0]:10.3f}{-1:10.3f}{0:10.3f}{0:10.3f}{-1:10.3f}{0:10.3f}{0:10.3f}    l\n")
         fid.write(f"{TBOUND[0]:10.3f}{-1:10.3f}{0:10.3f}{0:10.3f}{-1:10.3f}{0:10.3f}{0:10.3f}\n")
 
@@ -276,7 +209,8 @@ def lbl_write_tape5_od(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcf
 
         for i in range(N):
             if gcflag == 1:
-                gcvar = [prof['w'][i], CO2amt[i] if hasattr(CO2amt, '__getitem__') else CO2amt, prof['oz'][i]]
+                #gcvar = [prof['w'][i], CO2amt[i] if hasattr(CO2amt, '__getitem__') else CO2amt, prof['oz'][i]]
+                gcvar = [prof['w'][i], prof['co2'][i] if hasattr(prof['co2'][i], '__getitem__') else CO2amt, prof['oz'][i]]
             elif gcflag == 2 or gcflag == 3:
                 gcvar = [prof['w'][i], 0.0, 0.0]; aflagstring = 'AAAA'
             elif gcflag == 4:
@@ -284,12 +218,12 @@ def lbl_write_tape5_od(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcf
             elif gcflag == 5:
                 gcvar = [0.0, 0.0, prof['oz'][i]]; aflagstring = 'AAAA'
             elif gcflag == 6:
-                gcvar = [0.0, CO2amt[i] if hasattr(CO2amt, '__getitem__') else CO2amt, 0.0]; aflagstring = 'AAAA'
+                gcvar = [0.0, prof['co2'][i] if hasattr(prof['co2'][i], '__getitem__') else CO2amt, 0.0]; aflagstring = 'AAAA'
 
             #fid.write(f"{0.0:10.3f}{prof['pressure'][i]:10.5f}{prof['tdry'][i]:10.3f}     AA   CAA{aflagstring}\n")
             fid.write(f"{prof['alt'][i]/1000.0:10.3f}{prof['pressure'][i]:10.5f}{prof['tdry'][i]:10.3f}     AA   CAA{aflagstring}\n")
             fid.write("".join(f"{v:10.5f}" for v in gcvar) + '\n')
-            print(f"w: {gcvar[0]:.6e}, CO2: {gcvar[1]:.6e}, oz: {gcvar[2]:.6e}")
+            #print(f"w: {gcvar[0]:.6e}, CO2: {gcvar[1]:.6e}, oz: {gcvar[2]:.6e}")
 
         fid.write("    3    0    0 selected x-sections are :\n")
         fid.write("CCL4      F11       F12 \n")
@@ -299,116 +233,42 @@ def lbl_write_tape5_od(prof, comment, VBOUND, TBOUND, HBOUND, aflag, CO2amt, gcf
         fid.write(f"{boundaries[-1]:10.3f}     AAA\n")
         fid.write("1.105e-04 2.783e-04 5.027e-04\n")
 
-        # FFT parameters and wavenumber grid for spectral output.
-        fftmargin = 10.0
+        fid.write('-1.\n')
+
+        # FFTSCAN block for upwelling radiance and brightness temperature at TOA.
+
+        fftmargin = 10
 
         v1 = VBOUND[0] + fftmargin
         v2 = VBOUND[1] - fftmargin
 
-        # --- Begin branch for FFTSCAN parameters ---
-        if instrument == 1:  # S-HIS
-            string1 = '1.03702766'
-            Xmax = float(string1)
-            dv = 1.0 / (2 * Xmax)
-            j1 = int(v1 / dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            j2 = int(v2 / dv) + 1
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1   -4    0       0.0   12    1    1   13  0 0  '
-            string5 = f'{dv:10.8f}'
-            string6 = '\n'
-        elif instrument == 2:  # IASI
-            string1 = '2.00000000'
-            Xmax = float(string1)
-            dv = 1.0 / (2.0 * Xmax)
-            j1 = int(v1 / dv) + 1
-            j2 = int(v2 / dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1   -2    0       0.0   12    1    1   13  0 0  '
-            string5 = f'{dv:10.8f}'
-            string6 = '\n'
-        elif instrument == 3:  # CrIS: use max OPD = 0.8 cm
-            string1 = '0.80000000'  # CrIS maximum OPD in cm
-            Xmax = float(string1)
-            dv = 1.0 / (2. * Xmax)  # dv in cm^-1; here dv = 0.625 cm^-1
-            j1 = int(v1 / dv) + 1
-            j2 = int(v2 / dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            # Set an assumed flag string; adjust as needed for CrIS.
-            string4 = '    1   -3    0       0.0   12    1    1   13  0 0  '
-            string5 = f'{dv:10.8f}'
-            string6 = '\n'
-        else:
-            raise ValueError("ERROR: instrument not properly defined")
-
-        out_string = string1 + string2 + string3 + string4 + string5 + string6 
-        fid.write(out_string)
-        fid.write('-1.\n')
-
-       # FFTSCAN block for upwelling radiance and brightness temperature at TOA.
-        v1 = v1 + fftmargin
-        v2 = v2 - fftmargin
-
-        if instrument == 1:  # S-HIS
-            fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
-            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=2 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
-            string0 = '1.03702766'
-            Xmax = float(string0)
+        fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
+        if instrument == 2:  # IASI
+            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=3 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=1 XS=1    0    0\n')
+            Xmax = 2.0
             dv = 1.0/(2*Xmax)
-            j1  = int(v1/dv) + 1
-            j2  = int(v2/dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1    1                  13    1    1   11    0'
-            string1 = f'{dv:10.8f}'
-            string5 = '\n'
-        elif instrument == 2:  # IASI
-            fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
-            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=2 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
-            string0 = '2.00000000'
-            Xmax = float(string0)
-            dv = 1.0/(2*Xmax)
-            j1  = int(v1/dv) + 1
-            j2  = int(v2/dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1    1                  13    1    1   11    0'
-            string1 = f'{dv:10.8f}'
-            string5 = '\n'
+            string0 = f'{dv:10.3f}'
+            string1 = f'{v1:10.3f}'
+            string2 = f'{v2:10.3f}'
+            string3 = '    1    2    0     0.250   12    1    1   13  0 0'
+            string4 = '\n'
         elif instrument == 3:  # CrIS
-            fid.write('$ *** FFTSCAN for the Upwelling Radiance and Brightness Temperature at TOA ***\n')
-            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=2 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
-            string0 = '0.80000000'
-            Xmax = float(string0)
+            fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=0 FI=0 PL=0 TS=0 AM=0 MG=0 LA=0 OD=1 XS=1    0    0\n')
+            Xmax = 0.8
             dv = 1.0/(2*Xmax)
-            j1  = int(v1/dv) + 1
-            j2  = int(v2/dv) + 1
-            string2 = f'{(j1-1)*dv:10.5f}'
-            string3 = f'{(j2-1)*dv:10.5f}'
-            string4 = '    1    1                  13    1    1   11    0'
-            string1 = f'{dv:10.8f}'
-            string5 = '\n'
+            string0 = f'{dv:10.3f}'
+            string1 = f'{v1:10.3f}'
+            string2 = f'{v2:10.5f}'
+            string3 = '    1    2    0     0.250   12    1    1   13  0 0'
+            string4 = '\n'
         else:
             raise ValueError("ERROR: instrument not properly defined")
 
-        out_string = string1 + string2 + string3 + string4 + string5
+        out_string = string0 + string1 + string2 + string3 + string4
         fid.write(out_string)
         fid.write('-1.\n')
 
-
-        fid.write('$ Transfer to ASCII plotting data\n')
-        fid.write(' HI=0 F4=0 CN=0 AE=0 EM=0 SC=0 FI=0 PL=1 TS=0 AM=0 MG=0 LA=0 OD=0 XS=0    0    0\n')
-        fid.write('# Plot title not used\n')
-        string7 = '   10.2000  100.0000    5    0   11    0    1.0000 0  0    0\n'
-        out_string = string2 + string3 + string7
-        fid.write(out_string)
-        fid.write('    0.0000    1.2000    7.0200    0.2000    4    0    1    1    0    0 0    3 27\n')
-        fid.write(out_string)
-        fid.write('    0.0000    1.2000    7.0200    0.2000    4    0    1    1    0    0 0    3 28\n')
-        fid.write('-1.\n')
-        fid.write('%\n')
+        print('Done with writing TAPE5 OD')
 
     return
 
@@ -524,9 +384,9 @@ def read_lbl_outputs(instrument, profile_dir):
     profile_dir = Path(profile_dir)
 
     # DEBUG: List all files in the directory
-    print(f"DEBUG: Listing contents of {profile_dir}")
-    for f in profile_dir.iterdir():
-        print(f" - {f.name}")
+    #print(f"DEBUG: Listing contents of {profile_dir}")
+    #for f in profile_dir.iterdir():
+    #    print(f" - {f.name}")
 
     # Check for TAPE27 specifically
     tape27 = profile_dir / 'TAPE27'
